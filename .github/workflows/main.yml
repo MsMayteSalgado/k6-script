@@ -55,9 +55,13 @@ on:
         required: false
         default: "1m"
 
-      # ── RPS override (optional) ─────────────────────────────────────────────
+      # ── RPS / Iterations override (optional) ────────────────────────────────
       target_total_rps:
         description: "Total target RPS across all runners (0 = use VU ramp)"
+        required: false
+        default: "0"
+      target_iterations:
+        description: "Fixed number of iterations to run instantly and stop (0 = off)"
         required: false
         default: "0"
 
@@ -255,6 +259,7 @@ jobs:
             -e START_VUS="${{ steps.calc.outputs.start_vus }}" \
             -e PEAK_VUS="${{ steps.calc.outputs.peak_vus }}" \
             -e END_VUS="${{ steps.calc.outputs.end_vus }}" \
+            -e TARGET_ITERATIONS="${{ github.event.inputs.target_iterations || '0' }}" \
             -e RAMP_UP="${{ github.event.inputs.ramp_up || '1m' }}" \
             -e STEADY="${{ github.event.inputs.steady || '3m' }}" \
             -e RAMP_DOWN="${{ github.event.inputs.ramp_down || '1m' }}" \
