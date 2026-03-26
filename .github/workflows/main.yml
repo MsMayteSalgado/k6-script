@@ -61,28 +61,6 @@ on:
         required: false
         default: "0"
 
-      # ── Crawl options ────────────────────────────────────────────────────────
-      batch_size:
-        description: "Max assets fetched per batch (crawl mode)"
-        required: false
-        default: "6"
-      max_pages_per_vu:
-        description: "Pages / API calls per VU iteration"
-        required: false
-        default: "8"
-      max_discovery_per_page:
-        description: "Max links parsed from each response"
-        required: false
-        default: "30"
-      max_queue_size:
-        description: "Max URL queue size per VU"
-        required: false
-        default: "200"
-      api_pick_ratio:
-        description: "Priority for API URLs in queue (0–1)"
-        required: false
-        default: "0.35"
-
       # ── API mode ─────────────────────────────────────────────────────────────
       endpoints_json:
         description: |
@@ -156,12 +134,6 @@ on:
         description: "Comma-separated instance IDs per region"
         required: false
         default: "1"
-
-      # ── Tool ─────────────────────────────────────────────────────────────────
-      k6_version:
-        description: "k6 version to install"
-        required: false
-        default: "v0.51.0"
 
 # ─── Jobs ─────────────────────────────────────────────────────────────────────
 
@@ -242,9 +214,9 @@ jobs:
           echo "ip=$IP" >> "$GITHUB_OUTPUT"
           echo "Runner IP: $IP  |  Region: ${{ matrix.region }}  |  Instance: ${{ matrix.instance }}"
 
-      - name: Install k6 ${{ github.event.inputs.k6_version || 'v0.51.0' }}
+      - name: Install k6
         run: |
-          K6_VER="${{ github.event.inputs.k6_version || 'v0.51.0' }}"
+          K6_VER="v0.51.0"
           curl -fsSL "https://github.com/grafana/k6/releases/download/${K6_VER}/k6-${K6_VER}-linux-amd64.tar.gz" \
             | tar -xz
           sudo mv "k6-${K6_VER}-linux-amd64/k6" /usr/local/bin/k6
@@ -286,11 +258,6 @@ jobs:
             -e RAMP_UP="${{ github.event.inputs.ramp_up || '1m' }}" \
             -e STEADY="${{ github.event.inputs.steady || '3m' }}" \
             -e RAMP_DOWN="${{ github.event.inputs.ramp_down || '1m' }}" \
-            -e BATCH_SIZE="${{ github.event.inputs.batch_size || '6' }}" \
-            -e MAX_PAGES_PER_VU="${{ github.event.inputs.max_pages_per_vu || '8' }}" \
-            -e MAX_DISCOVERY_PER_PAGE="${{ github.event.inputs.max_discovery_per_page || '30' }}" \
-            -e MAX_QUEUE_SIZE="${{ github.event.inputs.max_queue_size || '200' }}" \
-            -e API_PICK_RATIO="${{ github.event.inputs.api_pick_ratio || '0.35' }}" \
             -e ENDPOINTS_JSON='${{ github.event.inputs.endpoints_json }}' \
             -e AUTH_URL="${{ github.event.inputs.auth_url }}" \
             -e AUTH_BODY='${{ github.event.inputs.auth_body }}' \
