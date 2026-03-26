@@ -48,7 +48,7 @@ export function normalizeUrl(candidate, base, origin) {
         if (u.origin !== origin) return null;
         u.hash = "";
         return u.toString();
-    } catch {
+    } catch (e) {
         return null;
     }
 }
