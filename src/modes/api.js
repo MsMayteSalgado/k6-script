@@ -31,8 +31,7 @@ function getEndpoints() {
     try {
         const raw = JSON.parse(CFG.endpointsJson);
         const total = raw.reduce((s, e) => s + (e.weight || 1), 0);
-        _parsedEndpoints = raw.map(e => ({
-            ...e,
+        _parsedEndpoints = raw.map(e => Object.assign({}, e, {
             weight: (e.weight || 1) / total,
         }));
     } catch (e) {
@@ -60,10 +59,11 @@ export function runApi({ token, spoofedIp }) {
     const method = (ep.method || "GET").toUpperCase();
     const ua = randomItem(USER_AGENTS);
 
-    const headers = {
-        ...buildHeaders(ua, CFG.targetUrl, "api", token, spoofedIp),
-        ...(ep.headers || {}),
-    };
+    const headers = Object.assign(
+        {},
+        buildHeaders(ua, CFG.targetUrl, "api", token, spoofedIp),
+        ep.headers || {}
+    );
 
     let body = null;
     if (ep.body) {
