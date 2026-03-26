@@ -27,8 +27,8 @@ export function getAdaptiveThinkTime(lastStatus) {
 }
 
 export function baseOrigin(url) {
-    const u = new URL(url);
-    return `${u.protocol}//${u.host}`;
+  const match = url.match(/^https?:\/\/[^\/]+/);
+  return match ? match[0] : url;
 }
 
 /**
