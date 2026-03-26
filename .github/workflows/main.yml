@@ -1,6 +1,14 @@
 name: k6 Distributed Load Test
 
 on:
+  # ── Scheduled endurance run — every day at 02:00 UTC ────────────────────────
+  # Uncomment to enable automatic nightly soak testing:
+  # schedule:
+  #   - cron: '0 2 * * *'   # daily at 02:00 UTC
+
+  # ── Reusable workflow support ────────────────────────────────────────────────
+  workflow_call:
+
   workflow_dispatch:
     inputs:
 
@@ -15,14 +23,6 @@ on:
           - api     # fire configurable API endpoints with weights
           - smoke   # single-VU sanity check
           - soak    # long-duration endurance test (set steady to 1h or more)
-
-  # ── Scheduled endurance run — every day at 02:00 UTC ────────────────────────
-  # Uncomment to enable automatic nightly soak testing:
-  # schedule:
-  #   - cron: '0 2 * * *'   # daily at 02:00 UTC
-
-  # ── Reusable workflow support ────────────────────────────────────────────────
-  workflow_call:
 
       target_url:
         description: "Target URL (include trailing slash)"
@@ -352,148 +352,148 @@ jobs:
 
           # ── Extract all metrics via Python ─────────────────────────────────
           python3 << 'PYEOF' >> "$S"
-import json, os, sys
-
-with open('summary.json') as f:
-    data = json.load(f)
-
-m = data.get('metrics', {})
-
-def val(metric, key, default='n/a'):
-    v = m.get(metric, {}).get('values', {}).get(key)
-    return v if v is not None else default
-
-def fmt_ms(v):
-    if v == 'n/a': return 'n/a'
-    return f'{round(float(v), 1)} ms'
-
-def fmt_rate(v, as_pct=True):
-    if v == 'n/a': return 'n/a'
-    f = float(v)
-    return f'{round(f * 100, 2)}%' if as_pct else f'{round(f, 2)}'
-
-def fmt_int(v):
-    if v == 'n/a': return 'n/a'
-    return f'{int(float(v)):,}'
-
-# ── Throughput ──────────────────────────────────────────────────────────────
-total_reqs  = val('http_reqs', 'count')
-avg_rps     = val('http_reqs', 'rate')
-data_sent   = val('data_sent', 'count')
-data_recv   = val('data_received', 'count')
-
-# ── Latency ─────────────────────────────────────────────────────────────────
-p50  = val('http_req_duration', 'p(50)')
-p90  = val('http_req_duration', 'p(90)')
-p95  = val('http_req_duration', 'p(95)')
-p99  = val('http_req_duration', 'p(99)')
-avg  = val('http_req_duration', 'avg')
-minv = val('http_req_duration', 'min')
-maxv = val('http_req_duration', 'max')
-
-# ── Error rates ─────────────────────────────────────────────────────────────
-failed     = val('failed_requests', 'rate')
-srv_err    = val('server_errors',   'rate')
-rate_lim   = val('rate_limited',    'rate')
-auth_fail  = val('auth_failures',   'count')
-
-# ── Crawl ───────────────────────────────────────────────────────────────────
-crawl_avg = val('crawl_depth', 'avg')
-crawl_max = val('crawl_depth', 'max')
-
-# ── Connection breakdown ─────────────────────────────────────────────────────
-conn_time  = val('http_req_connecting',   'avg')
-tls_time   = val('http_req_tls_handshaking', 'avg')
-wait_time  = val('http_req_waiting',      'avg')
-send_time  = val('http_req_sending',      'avg')
-recv_time  = val('http_req_receiving',    'avg')
-
-# ── Thresholds pass/fail ────────────────────────────────────────────────────
-thresholds = data.get('thresholds', {})
-
-def th_status(key):
-    t = thresholds.get(key, {})
-    ok = t.get('ok', None)
-    if ok is None: return '—'
-    return '✅ pass' if ok else '❌ FAIL'
-
-# ── Write sections ──────────────────────────────────────────────────────────
-print("### Throughput\n")
-print("| Metric | Value |")
-print("|---|---|")
-print(f"| Total requests | {fmt_int(total_reqs)} |")
-print(f"| Avg RPS | {round(float(avg_rps), 2) if avg_rps != 'n/a' else 'n/a'} req/s |")
-if data_sent != 'n/a':
-    print(f"| Data sent | {round(float(data_sent)/1024/1024, 2)} MB |")
-if data_recv != 'n/a':
-    print(f"| Data received | {round(float(data_recv)/1024/1024, 2)} MB |")
-print()
-
-print("### Latency\n")
-print("| Percentile | Duration |")
-print("|---|---|")
-print(f"| min | {fmt_ms(minv)} |")
-print(f"| avg | {fmt_ms(avg)} |")
-print(f"| p(50) | {fmt_ms(p50)} |")
-print(f"| p(90) | {fmt_ms(p90)} |")
-print(f"| **p(95)** | **{fmt_ms(p95)}** |")
-print(f"| p(99) | {fmt_ms(p99)} |")
-print(f"| max | {fmt_ms(maxv)} |")
-print()
-
-print("### Connection breakdown (avg)\n")
-print("| Stage | Time |")
-print("|---|---|")
-print(f"| DNS + connecting | {fmt_ms(conn_time)} |")
-print(f"| TLS handshake | {fmt_ms(tls_time)} |")
-print(f"| Waiting (TTFB) | {fmt_ms(wait_time)} |")
-print(f"| Sending | {fmt_ms(send_time)} |")
-print(f"| Receiving | {fmt_ms(recv_time)} |")
-print()
-
-print("### Error rates\n")
-print("| Metric | Value |")
-print("|---|---|")
-print(f"| Failed requests | {fmt_rate(failed)} |")
-print(f"| Server errors (5xx) | {fmt_rate(srv_err)} |")
-print(f"| Rate limited (429) | {fmt_rate(rate_lim)} |")
-if auth_fail != 'n/a' and float(auth_fail) > 0:
-    print(f"| Auth failures | {fmt_int(auth_fail)} |")
-print()
-
-if crawl_avg != 'n/a':
-    print("### Crawl depth\n")
-    print("| Metric | Value |")
-    print("|---|---|")
-    print(f"| Avg pages/VU | {round(float(crawl_avg), 1)} |")
-    print(f"| Max pages/VU | {int(float(crawl_max))} |")
-    print()
-
-print("### Threshold results\n")
-print("| Threshold | Result |")
-print("|---|---|")
-print(f"| failed_requests | {th_status('failed_requests')} |")
-print(f"| server_errors | {th_status('server_errors')} |")
-print(f"| http_req_duration p(95) | {th_status('http_req_duration')} |")
-print(f"| http_req_failed | {th_status('http_req_failed')} |")
-if 'rate_limited' in thresholds:
-    print(f"| rate_limited | {th_status('rate_limited')} |")
-print()
-
-# ── Overall verdict ─────────────────────────────────────────────────────────
-all_ok = all(
-    t.get('ok', True)
-    for t in thresholds.values()
-)
-if all_ok:
-    print("### ✅ All thresholds passed")
-else:
-    failed_th = [k for k, t in thresholds.items() if not t.get('ok', True)]
-    print(f"### ❌ {len(failed_th)} threshold(s) failed")
-    for k in failed_th:
-        print(f"- `{k}`")
-print()
-PYEOF
+          import json, os, sys
+          
+          with open('summary.json') as f:
+              data = json.load(f)
+          
+          m = data.get('metrics', {})
+          
+          def val(metric, key, default='n/a'):
+              v = m.get(metric, {}).get('values', {}).get(key)
+              return v if v is not None else default
+          
+          def fmt_ms(v):
+              if v == 'n/a': return 'n/a'
+              return f'{round(float(v), 1)} ms'
+          
+          def fmt_rate(v, as_pct=True):
+              if v == 'n/a': return 'n/a'
+              f = float(v)
+              return f'{round(f * 100, 2)}%' if as_pct else f'{round(f, 2)}'
+          
+          def fmt_int(v):
+              if v == 'n/a': return 'n/a'
+              return f'{int(float(v)):,}'
+          
+          # ── Throughput ──────────────────────────────────────────────────────────────
+          total_reqs  = val('http_reqs', 'count')
+          avg_rps     = val('http_reqs', 'rate')
+          data_sent   = val('data_sent', 'count')
+          data_recv   = val('data_received', 'count')
+          
+          # ── Latency ─────────────────────────────────────────────────────────────────
+          p50  = val('http_req_duration', 'p(50)')
+          p90  = val('http_req_duration', 'p(90)')
+          p95  = val('http_req_duration', 'p(95)')
+          p99  = val('http_req_duration', 'p(99)')
+          avg  = val('http_req_duration', 'avg')
+          minv = val('http_req_duration', 'min')
+          maxv = val('http_req_duration', 'max')
+          
+          # ── Error rates ─────────────────────────────────────────────────────────────
+          failed     = val('failed_requests', 'rate')
+          srv_err    = val('server_errors',   'rate')
+          rate_lim   = val('rate_limited',    'rate')
+          auth_fail  = val('auth_failures',   'count')
+          
+          # ── Crawl ───────────────────────────────────────────────────────────────────
+          crawl_avg = val('crawl_depth', 'avg')
+          crawl_max = val('crawl_depth', 'max')
+          
+          # ── Connection breakdown ─────────────────────────────────────────────────────
+          conn_time  = val('http_req_connecting',   'avg')
+          tls_time   = val('http_req_tls_handshaking', 'avg')
+          wait_time  = val('http_req_waiting',      'avg')
+          send_time  = val('http_req_sending',      'avg')
+          recv_time  = val('http_req_receiving',    'avg')
+          
+          # ── Thresholds pass/fail ────────────────────────────────────────────────────
+          thresholds = data.get('thresholds', {})
+          
+          def th_status(key):
+              t = thresholds.get(key, {})
+              ok = t.get('ok', None)
+              if ok is None: return '—'
+              return '✅ pass' if ok else '❌ FAIL'
+          
+          # ── Write sections ──────────────────────────────────────────────────────────
+          print("### Throughput\n")
+          print("| Metric | Value |")
+          print("|---|---|")
+          print(f"| Total requests | {fmt_int(total_reqs)} |")
+          print(f"| Avg RPS | {round(float(avg_rps), 2) if avg_rps != 'n/a' else 'n/a'} req/s |")
+          if data_sent != 'n/a':
+              print(f"| Data sent | {round(float(data_sent)/1024/1024, 2)} MB |")
+          if data_recv != 'n/a':
+              print(f"| Data received | {round(float(data_recv)/1024/1024, 2)} MB |")
+          print()
+          
+          print("### Latency\n")
+          print("| Percentile | Duration |")
+          print("|---|---|")
+          print(f"| min | {fmt_ms(minv)} |")
+          print(f"| avg | {fmt_ms(avg)} |")
+          print(f"| p(50) | {fmt_ms(p50)} |")
+          print(f"| p(90) | {fmt_ms(p90)} |")
+          print(f"| **p(95)** | **{fmt_ms(p95)}** |")
+          print(f"| p(99) | {fmt_ms(p99)} |")
+          print(f"| max | {fmt_ms(maxv)} |")
+          print()
+          
+          print("### Connection breakdown (avg)\n")
+          print("| Stage | Time |")
+          print("|---|---|")
+          print(f"| DNS + connecting | {fmt_ms(conn_time)} |")
+          print(f"| TLS handshake | {fmt_ms(tls_time)} |")
+          print(f"| Waiting (TTFB) | {fmt_ms(wait_time)} |")
+          print(f"| Sending | {fmt_ms(send_time)} |")
+          print(f"| Receiving | {fmt_ms(recv_time)} |")
+          print()
+          
+          print("### Error rates\n")
+          print("| Metric | Value |")
+          print("|---|---|")
+          print(f"| Failed requests | {fmt_rate(failed)} |")
+          print(f"| Server errors (5xx) | {fmt_rate(srv_err)} |")
+          print(f"| Rate limited (429) | {fmt_rate(rate_lim)} |")
+          if auth_fail != 'n/a' and float(auth_fail) > 0:
+              print(f"| Auth failures | {fmt_int(auth_fail)} |")
+          print()
+          
+          if crawl_avg != 'n/a':
+              print("### Crawl depth\n")
+              print("| Metric | Value |")
+              print("|---|---|")
+              print(f"| Avg pages/VU | {round(float(crawl_avg), 1)} |")
+              print(f"| Max pages/VU | {int(float(crawl_max))} |")
+              print()
+          
+          print("### Threshold results\n")
+          print("| Threshold | Result |")
+          print("|---|---|")
+          print(f"| failed_requests | {th_status('failed_requests')} |")
+          print(f"| server_errors | {th_status('server_errors')} |")
+          print(f"| http_req_duration p(95) | {th_status('http_req_duration')} |")
+          print(f"| http_req_failed | {th_status('http_req_failed')} |")
+          if 'rate_limited' in thresholds:
+              print(f"| rate_limited | {th_status('rate_limited')} |")
+          print()
+          
+          # ── Overall verdict ─────────────────────────────────────────────────────────
+          all_ok = all(
+              t.get('ok', True)
+              for t in thresholds.values()
+          )
+          if all_ok:
+              print("### ✅ All thresholds passed")
+          else:
+              failed_th = [k for k, t in thresholds.items() if not t.get('ok', True)]
+              print(f"### ❌ {len(failed_th)} threshold(s) failed")
+              for k in failed_th:
+                  print(f"- `{k}`")
+          print()
+          PYEOF
 
           # ── Artifact link ────────────────────────────────────────────────────
           echo "" >> "$S"
