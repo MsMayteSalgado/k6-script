@@ -1,0 +1,504 @@
+name: k6 Distributed Load Test
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      # ── Test behaviour ──────────────────────────────────────────────────────
+      test_mode:
+        description: "Test mode"
+        required: false
+        default: "crawl"
+        type: choice
+        options:
+          - crawl   # realistic browser simulation — discovers + visits links
+          - api     # fire configurable API endpoints with weights
+          - smoke   # single-VU sanity check
+          - soak    # long-duration endurance test (set steady to 1h or more)
+
+  # ── Scheduled endurance run — every day at 02:00 UTC ────────────────────────
+  # Uncomment to enable automatic nightly soak testing:
+  # schedule:
+  #   - cron: '0 2 * * *'   # daily at 02:00 UTC
+
+  # ── Reusable workflow support ────────────────────────────────────────────────
+  workflow_call:
+
+      target_url:
+        description: "Target URL (include trailing slash)"
+        required: false
+        default: "https://example.com/"
+
+      # ── VU / timing ─────────────────────────────────────────────────────────
+      start_vus:
+        description: "Starting VUs during ramp-up"
+        required: false
+        default: "5"
+      peak_vus:
+        description: "Peak VUs (per runner)"
+        required: false
+        default: "40"
+      end_vus:
+        description: "Ending VUs during ramp-down"
+        required: false
+        default: "5"
+      ramp_up:
+        description: "Ramp-up duration (e.g. 1m, 30s)"
+        required: false
+        default: "1m"
+      steady:
+        description: "Steady-state duration (e.g. 3m)"
+        required: false
+        default: "3m"
+      ramp_down:
+        description: "Ramp-down duration (e.g. 1m)"
+        required: false
+        default: "1m"
+
+      # ── RPS override (optional) ─────────────────────────────────────────────
+      target_total_rps:
+        description: "Total target RPS across all runners (0 = use VU ramp)"
+        required: false
+        default: "0"
+
+      # ── Crawl options ────────────────────────────────────────────────────────
+      batch_size:
+        description: "Max assets fetched per batch (crawl mode)"
+        required: false
+        default: "6"
+      max_pages_per_vu:
+        description: "Pages / API calls per VU iteration"
+        required: false
+        default: "8"
+      max_discovery_per_page:
+        description: "Max links parsed from each response"
+        required: false
+        default: "30"
+      max_queue_size:
+        description: "Max URL queue size per VU"
+        required: false
+        default: "200"
+      api_pick_ratio:
+        description: "Priority for API URLs in queue (0–1)"
+        required: false
+        default: "0.35"
+
+      # ── API mode ─────────────────────────────────────────────────────────────
+      endpoints_json:
+        description: |
+          API endpoints (JSON array). Example:
+          [{"name":"list","url":"/api/users","method":"GET","weight":0.6},
+           {"name":"create","url":"/api/orders","method":"POST","body":"{\"qty\":1}","weight":0.4}]
+        required: false
+        default: ""
+
+      # ── Auth (optional) ──────────────────────────────────────────────────────
+      auth_url:
+        description: "Auth endpoint URL (leave empty to skip)"
+        required: false
+        default: ""
+      auth_body:
+        description: 'Auth POST body JSON e.g. {"email":"u@x.com","password":"pw"}'
+        required: false
+        default: ""
+      auth_token_path:
+        description: "Dot-path to token in auth response (e.g. data.accessToken)"
+        required: false
+        default: "token"
+      auth_header:
+        description: "Header name for auth token"
+        required: false
+        default: "Authorization"
+      auth_scheme:
+        description: 'Auth header prefix (e.g. "Bearer " or "" for API keys)'
+        required: false
+        default: "Bearer "
+
+      # ── Thresholds ────────────────────────────────────────────────────────────
+      max_error_rate:
+        description: "Max allowed failure rate (0–1, default 0.05 = 5%)"
+        required: false
+        default: "0.05"
+      max_server_error_rate:
+        description: "Max allowed 5xx rate (0–1, default 0.02 = 2%)"
+        required: false
+        default: "0.02"
+      max_p95_ms:
+        description: "Max p(95) response time in ms (default 1500)"
+        required: false
+        default: "1500"
+      expect_429:
+        description: "Expect rate limiting (test FAILS if no 429s observed)"
+        required: false
+        type: boolean
+        default: false
+      min_429_rate:
+        description: "Minimum expected 429 rate when expect_429=true"
+        required: false
+        default: "0.01"
+      breakpoint:
+        description: "Stop test instantly on any threshold failure"
+        required: false
+        type: boolean
+        default: false
+      spoof_ip:
+        description: "Generate and inject true public IP headers"
+        required: false
+        type: boolean
+        default: false
+
+      # ── Matrix ────────────────────────────────────────────────────────────────
+      regions:
+        description: "Comma-separated region labels (cosmetic — controls matrix)"
+        required: false
+        default: "region-1"
+      instances:
+        description: "Comma-separated instance IDs per region"
+        required: false
+        default: "1"
+
+      # ── Tool ─────────────────────────────────────────────────────────────────
+      k6_version:
+        description: "k6 version to install"
+        required: false
+        default: "v0.51.0"
+
+# ─── Jobs ─────────────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ── 1. Build the runner matrix ──────────────────────────────────────────────
+  prepare-matrix:
+    name: Prepare runner matrix
+    runs-on: ubuntu-latest
+    outputs:
+      regions_json:   ${{ steps.build.outputs.regions_json }}
+      instances_json: ${{ steps.build.outputs.instances_json }}
+      job_count:      ${{ steps.build.outputs.job_count }}
+
+    steps:
+      - name: Build matrix JSON from inputs
+        id: build
+        shell: bash
+        run: |
+          REGIONS="${{ github.event.inputs.regions }}"
+          INSTANCES="${{ github.event.inputs.instances }}"
+
+          to_json() {
+            echo "$1" | tr -d ' ' | awk -F',' '
+              BEGIN { printf "[" }
+              {
+                c=0
+                for (i=1; i<=NF; i++) {
+                  if ($i != "") { printf "%s\"%s\"", (c++ ? "," : ""), $i }
+                }
+              }
+              END { printf "]" }'
+          }
+
+          count_items() {
+            echo "$1" | tr -d ' ' | awk -F',' '
+              { c=0; for(i=1;i<=NF;i++) { if($i!="") c++ } print c }'
+          }
+
+          REGIONS_JSON=$(to_json "$REGIONS")
+          INSTANCES_JSON=$(to_json "$INSTANCES")
+          R_COUNT=$(count_items "$REGIONS")
+          I_COUNT=$(count_items "$INSTANCES")
+          JOB_COUNT=$(( R_COUNT * I_COUNT ))
+          [ "$JOB_COUNT" -lt 1 ] && JOB_COUNT=1
+
+          echo "regions_json=$REGIONS_JSON"   >> "$GITHUB_OUTPUT"
+          echo "instances_json=$INSTANCES_JSON" >> "$GITHUB_OUTPUT"
+          echo "job_count=$JOB_COUNT"          >> "$GITHUB_OUTPUT"
+
+          echo "### Matrix" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Regions : \`$REGIONS\`"   >> "$GITHUB_STEP_SUMMARY"
+          echo "- Instances: \`$INSTANCES\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Total runners: **$JOB_COUNT**" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 2. Run k6 on each matrix node ───────────────────────────────────────────
+  load-test:
+    name: "k6 [${{ matrix.region }} / ${{ matrix.instance }}]"
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        region:   ${{ fromJson(needs.prepare-matrix.outputs.regions_json) }}
+        instance: ${{ fromJson(needs.prepare-matrix.outputs.instances_json) }}
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect runner IP
+        id: ip
+        run: |
+          IP=$(curl -sf https://api.ipify.org || echo "unknown")
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "Runner IP: $IP  |  Region: ${{ matrix.region }}  |  Instance: ${{ matrix.instance }}"
+
+      - name: Install k6 ${{ github.event.inputs.k6_version || 'v0.51.0' }}
+        run: |
+          K6_VER="${{ github.event.inputs.k6_version || 'v0.51.0' }}"
+          curl -fsSL "https://github.com/grafana/k6/releases/download/${K6_VER}/k6-${K6_VER}-linux-amd64.tar.gz" \
+            | tar -xz
+          sudo mv "k6-${K6_VER}-linux-amd64/k6" /usr/local/bin/k6
+          k6 version
+
+      - name: Compute per-job VUs and RPS
+        id: calc
+        run: |
+          JOB_COUNT="${{ needs.prepare-matrix.outputs.job_count }}"
+          [ "$JOB_COUNT" -lt 1 ] && JOB_COUNT=1
+
+          PEAK="${{ github.event.inputs.peak_vus || '40' }}"
+          START="${{ github.event.inputs.start_vus || '5' }}"
+          END="${{ github.event.inputs.end_vus || '5' }}"
+
+          # pass through VUs unchanged — each runner carries the full VU budget
+          # (use target_total_rps to cap total throughput instead)
+          echo "start_vus=$START"   >> "$GITHUB_OUTPUT"
+          echo "peak_vus=$PEAK"     >> "$GITHUB_OUTPUT"
+          echo "end_vus=$END"       >> "$GITHUB_OUTPUT"
+
+          TOTAL_RPS="${{ github.event.inputs.target_total_rps || '0' }}"
+          RPS_ARGS=""
+          if [ "$TOTAL_RPS" -gt 0 ] 2>/dev/null; then
+            RPS_PER_JOB=$(( (TOTAL_RPS + JOB_COUNT - 1) / JOB_COUNT ))
+            MAX_VUS_VAL=$(( PEAK * 2 ))
+            RPS_ARGS="-e TARGET_RPS=$RPS_PER_JOB -e PREALLOCATED_VUS=$PEAK -e MAX_VUS=$MAX_VUS_VAL"
+          fi
+          echo "rps_args=$RPS_ARGS" >> "$GITHUB_OUTPUT"
+
+      - name: Run k6
+        run: |
+          k6 run \
+            -e TEST_MODE="${{ github.event.inputs.test_mode || 'crawl' }}" \
+            -e TARGET_URL="${{ github.event.inputs.target_url || 'https://example.com/' }}" \
+            -e START_VUS="${{ steps.calc.outputs.start_vus }}" \
+            -e PEAK_VUS="${{ steps.calc.outputs.peak_vus }}" \
+            -e END_VUS="${{ steps.calc.outputs.end_vus }}" \
+            -e RAMP_UP="${{ github.event.inputs.ramp_up || '1m' }}" \
+            -e STEADY="${{ github.event.inputs.steady || '3m' }}" \
+            -e RAMP_DOWN="${{ github.event.inputs.ramp_down || '1m' }}" \
+            -e BATCH_SIZE="${{ github.event.inputs.batch_size || '6' }}" \
+            -e MAX_PAGES_PER_VU="${{ github.event.inputs.max_pages_per_vu || '8' }}" \
+            -e MAX_DISCOVERY_PER_PAGE="${{ github.event.inputs.max_discovery_per_page || '30' }}" \
+            -e MAX_QUEUE_SIZE="${{ github.event.inputs.max_queue_size || '200' }}" \
+            -e API_PICK_RATIO="${{ github.event.inputs.api_pick_ratio || '0.35' }}" \
+            -e ENDPOINTS_JSON='${{ github.event.inputs.endpoints_json }}' \
+            -e AUTH_URL="${{ github.event.inputs.auth_url }}" \
+            -e AUTH_BODY='${{ github.event.inputs.auth_body }}' \
+            -e AUTH_TOKEN_PATH="${{ github.event.inputs.auth_token_path || 'token' }}" \
+            -e AUTH_HEADER="${{ github.event.inputs.auth_header || 'Authorization' }}" \
+            -e AUTH_SCHEME="${{ github.event.inputs.auth_scheme || 'Bearer ' }}" \
+            -e MAX_ERROR_RATE="${{ github.event.inputs.max_error_rate || '0.05' }}" \
+            -e MAX_SERVER_ERROR_RATE="${{ github.event.inputs.max_server_error_rate || '0.02' }}" \
+            -e MAX_P95_MS="${{ github.event.inputs.max_p95_ms || '1500' }}" \
+            -e EXPECT_429="${{ github.event.inputs.expect_429 || 'false' }}" \
+            -e MIN_429_RATE="${{ github.event.inputs.min_429_rate || '0.01' }}" \
+            -e BREAKPOINT="${{ github.event.inputs.breakpoint || 'false' }}" \
+            -e SPOOF_IP="${{ github.event.inputs.spoof_ip || 'false' }}" \
+            -e MIN_THINK_TIME="0.5" \
+            -e THINK_JITTER="1.5" \
+            ${{ steps.calc.outputs.rps_args }} \
+            --out json=results.json \
+            script.js
+
+      - name: Upload results artifact
+        if: always()   # upload even on threshold failure so you can diagnose
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-results-${{ matrix.region }}-${{ matrix.instance }}
+          path: |
+            summary.json
+            results.json
+          retention-days: 30
+
+      - name: Write job summary
+        if: always()
+        run: |
+          REGION="${{ matrix.region }}"
+          INSTANCE="${{ matrix.instance }}"
+          MODE="${{ github.event.inputs.test_mode || 'crawl' }}"
+          TARGET="${{ github.event.inputs.target_url || 'https://example.com/' }}"
+          PEAK_VUS="${{ steps.calc.outputs.peak_vus }}"
+          RUNNER_IP="${{ steps.ip.outputs.ip }}"
+          MAX_P95="${{ github.event.inputs.max_p95_ms || '1500' }}"
+          MAX_ERR="${{ github.event.inputs.max_error_rate || '0.05' }}"
+          MAX_5XX="${{ github.event.inputs.max_server_error_rate || '0.02' }}"
+
+          S="$GITHUB_STEP_SUMMARY"
+
+          echo "## k6 Result — \`$REGION\` / instance \`$INSTANCE\`" >> "$S"
+          echo "" >> "$S"
+          echo "| | |" >> "$S"
+          echo "|---|---|" >> "$S"
+          echo "| **Mode** | \`$MODE\` |" >> "$S"
+          echo "| **Target** | $TARGET |" >> "$S"
+          echo "| **Peak VUs** | $PEAK_VUS |" >> "$S"
+          echo "| **Runner IP** | $RUNNER_IP |" >> "$S"
+          echo "" >> "$S"
+
+          if [ ! -f summary.json ]; then
+            echo "> ⚠️ \`summary.json\` not found — k6 may have crashed before completing." >> "$S"
+            exit 0
+          fi
+
+          # ── Extract all metrics via Python ─────────────────────────────────
+          python3 << 'PYEOF' >> "$S"
+import json, os, sys
+
+with open('summary.json') as f:
+    data = json.load(f)
+
+m = data.get('metrics', {})
+
+def val(metric, key, default='n/a'):
+    v = m.get(metric, {}).get('values', {}).get(key)
+    return v if v is not None else default
+
+def fmt_ms(v):
+    if v == 'n/a': return 'n/a'
+    return f'{round(float(v), 1)} ms'
+
+def fmt_rate(v, as_pct=True):
+    if v == 'n/a': return 'n/a'
+    f = float(v)
+    return f'{round(f * 100, 2)}%' if as_pct else f'{round(f, 2)}'
+
+def fmt_int(v):
+    if v == 'n/a': return 'n/a'
+    return f'{int(float(v)):,}'
+
+# ── Throughput ──────────────────────────────────────────────────────────────
+total_reqs  = val('http_reqs', 'count')
+avg_rps     = val('http_reqs', 'rate')
+data_sent   = val('data_sent', 'count')
+data_recv   = val('data_received', 'count')
+
+# ── Latency ─────────────────────────────────────────────────────────────────
+p50  = val('http_req_duration', 'p(50)')
+p90  = val('http_req_duration', 'p(90)')
+p95  = val('http_req_duration', 'p(95)')
+p99  = val('http_req_duration', 'p(99)')
+avg  = val('http_req_duration', 'avg')
+minv = val('http_req_duration', 'min')
+maxv = val('http_req_duration', 'max')
+
+# ── Error rates ─────────────────────────────────────────────────────────────
+failed     = val('failed_requests', 'rate')
+srv_err    = val('server_errors',   'rate')
+rate_lim   = val('rate_limited',    'rate')
+auth_fail  = val('auth_failures',   'count')
+
+# ── Crawl ───────────────────────────────────────────────────────────────────
+crawl_avg = val('crawl_depth', 'avg')
+crawl_max = val('crawl_depth', 'max')
+
+# ── Connection breakdown ─────────────────────────────────────────────────────
+conn_time  = val('http_req_connecting',   'avg')
+tls_time   = val('http_req_tls_handshaking', 'avg')
+wait_time  = val('http_req_waiting',      'avg')
+send_time  = val('http_req_sending',      'avg')
+recv_time  = val('http_req_receiving',    'avg')
+
+# ── Thresholds pass/fail ────────────────────────────────────────────────────
+thresholds = data.get('thresholds', {})
+
+def th_status(key):
+    t = thresholds.get(key, {})
+    ok = t.get('ok', None)
+    if ok is None: return '—'
+    return '✅ pass' if ok else '❌ FAIL'
+
+# ── Write sections ──────────────────────────────────────────────────────────
+print("### Throughput\n")
+print("| Metric | Value |")
+print("|---|---|")
+print(f"| Total requests | {fmt_int(total_reqs)} |")
+print(f"| Avg RPS | {round(float(avg_rps), 2) if avg_rps != 'n/a' else 'n/a'} req/s |")
+if data_sent != 'n/a':
+    print(f"| Data sent | {round(float(data_sent)/1024/1024, 2)} MB |")
+if data_recv != 'n/a':
+    print(f"| Data received | {round(float(data_recv)/1024/1024, 2)} MB |")
+print()
+
+print("### Latency\n")
+print("| Percentile | Duration |")
+print("|---|---|")
+print(f"| min | {fmt_ms(minv)} |")
+print(f"| avg | {fmt_ms(avg)} |")
+print(f"| p(50) | {fmt_ms(p50)} |")
+print(f"| p(90) | {fmt_ms(p90)} |")
+print(f"| **p(95)** | **{fmt_ms(p95)}** |")
+print(f"| p(99) | {fmt_ms(p99)} |")
+print(f"| max | {fmt_ms(maxv)} |")
+print()
+
+print("### Connection breakdown (avg)\n")
+print("| Stage | Time |")
+print("|---|---|")
+print(f"| DNS + connecting | {fmt_ms(conn_time)} |")
+print(f"| TLS handshake | {fmt_ms(tls_time)} |")
+print(f"| Waiting (TTFB) | {fmt_ms(wait_time)} |")
+print(f"| Sending | {fmt_ms(send_time)} |")
+print(f"| Receiving | {fmt_ms(recv_time)} |")
+print()
+
+print("### Error rates\n")
+print("| Metric | Value |")
+print("|---|---|")
+print(f"| Failed requests | {fmt_rate(failed)} |")
+print(f"| Server errors (5xx) | {fmt_rate(srv_err)} |")
+print(f"| Rate limited (429) | {fmt_rate(rate_lim)} |")
+if auth_fail != 'n/a' and float(auth_fail) > 0:
+    print(f"| Auth failures | {fmt_int(auth_fail)} |")
+print()
+
+if crawl_avg != 'n/a':
+    print("### Crawl depth\n")
+    print("| Metric | Value |")
+    print("|---|---|")
+    print(f"| Avg pages/VU | {round(float(crawl_avg), 1)} |")
+    print(f"| Max pages/VU | {int(float(crawl_max))} |")
+    print()
+
+print("### Threshold results\n")
+print("| Threshold | Result |")
+print("|---|---|")
+print(f"| failed_requests | {th_status('failed_requests')} |")
+print(f"| server_errors | {th_status('server_errors')} |")
+print(f"| http_req_duration p(95) | {th_status('http_req_duration')} |")
+print(f"| http_req_failed | {th_status('http_req_failed')} |")
+if 'rate_limited' in thresholds:
+    print(f"| rate_limited | {th_status('rate_limited')} |")
+print()
+
+# ── Overall verdict ─────────────────────────────────────────────────────────
+all_ok = all(
+    t.get('ok', True)
+    for t in thresholds.values()
+)
+if all_ok:
+    print("### ✅ All thresholds passed")
+else:
+    failed_th = [k for k, t in thresholds.items() if not t.get('ok', True)]
+    print(f"### ❌ {len(failed_th)} threshold(s) failed")
+    for k in failed_th:
+        print(f"- `{k}`")
+print()
+PYEOF
+
+          # ── Artifact link ────────────────────────────────────────────────────
+          echo "" >> "$S"
+          echo "---" >> "$S"
+          echo "📦 **Download full results**: artifact \`k6-results-${REGION}-${INSTANCE}\` (contains \`summary.json\` + \`results.json\`)" >> "$S"
+          echo "" >> "$S"
+          echo "> \`summary.json\` — aggregated percentiles and rates" >> "$S"
+          echo "> \`results.json\` — per-request time-series data (import into Grafana or a spreadsheet)" >> "$S"
