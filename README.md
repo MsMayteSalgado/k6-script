@@ -131,7 +131,30 @@ HTTPS_PROXY="http://username:password@proxy.example.com:8080" k6 run script.js
 | `min_429_rate` | `0.01` | Minimum 429 rate when `expect_429=true` |
 | `regions` | `region-1` | Comma-separated region labels (for matrix) |
 | `instances` | `1` | Comma-separated instance IDs (for matrix) |
-| `k6_version` | `v0.51.0` | k6 binary version to install |
+
+---
+
+## Environment Variables Reference
+
+If you are running the script locally via the `k6` CLI instead of GitHub Actions, you control the script entirely via Environment Variables (`-e VAR="VALUE"`).
+
+| Variable | Default | Description |
+|---|---|---|
+| `TEST_MODE` | `crawl` | Operating mode: `crawl`, `api`, or `smoke`. |
+| `TARGET_URL` | `https://example.com/` | The root URL or base API URL to test. |
+| `START_VUS` | `5` | Virtual Users at the very beginning of the test. |
+| `PEAK_VUS` | `40` | Maximum steady-state Virtual Users. |
+| `END_VUS` | `5` | Virtual Users at the end of the test. |
+| `RAMP_UP` | `1m` | Time duration to scale from `START` to `PEAK` VUs. |
+| `STEADY` | `3m` | Time duration to sustain `PEAK_VUS` load. (Use e.g. `10h` for soak tests). |
+| `RAMP_DOWN` | `1m` | Time duration to scale from `PEAK` to `END` VUs. |
+| `TARGET_RPS` | `0` | If > 0, bypasses VU pacing and hammers the server at exactly this exact Requests-Per-Second. |
+| `BATCH_SIZE` | `6` | Maximum number of CSS/JS/Image assets to download simultaneously during crawls. |
+| `ENDPOINTS_JSON` | `""` | JSON Array defining the endpoints and weights for API mode. |
+| `AUTH_URL` | `""` | Define a login endpoint to retrieve a Bearer token before the test starts. |
+| `BREAKPOINT` | `false` | Set to `true` to make the script **abort instantly** if any threshold (error rate, latency) is breached. |
+| `SPOOF_IP` | `false` | Automatically fetches your true public IP from `api.ipify.org` and injects it into proxy headers (`X-Forwarded-For`, etc.) to accurate simulate routing. |
+| `EXPECT_429` | `false` | Sets a threshold that actually fails the test if rate-limiting is **not** observed. |
 
 ---
 
