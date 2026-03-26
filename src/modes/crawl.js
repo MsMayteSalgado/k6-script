@@ -13,7 +13,14 @@ import { getSession, resetSession, dequeue, enqueue } from "../session.js";
  * Works with HTML sites, SPAs (static routes), and hybrid apps.
  */
 export function runCrawl({ token, spoofedIp }) {
-    const session = getSession();
+    let session = getSession();
+    
+    // Automatically restart crawl loop if the VU exhausted all discovered links on this site
+    if (session.queue.length === 0) {
+        resetSession();
+        session = getSession();
+    }
+
     const profile = session.profile;  // persistent identity for this session
     const origin = baseOrigin(CFG.targetUrl);
 

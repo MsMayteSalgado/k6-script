@@ -3,16 +3,17 @@ export const CFG = {
     targetUrl: __ENV.TARGET_URL || "http://localhost:3000/",
     testMode: (__ENV.TEST_MODE || "crawl").toLowerCase(),   // crawl | api | smoke
 
-    // Virtual users & timing
+    // Duration / Scaling
     startVUs: Number(__ENV.START_VUS) || 5,
-    peakVUs: Number(__ENV.PEAK_VUS || __ENV.VUS) || 50,
+    peakVUs: Number(__ENV.PEAK_VUS) || 40,
     endVUs: Number(__ENV.END_VUS) || 5,
     rampUp: __ENV.RAMP_UP || "1m",
-    steady: __ENV.STEADY || __ENV.DURATION || "3m",
+    steady: __ENV.STEADY || "3m",
     rampDown: __ENV.RAMP_DOWN || "1m",
+    targetRps: Number(__ENV.TARGET_RPS) || 0,
+    targetIterations: Number(__ENV.TARGET_ITERATIONS) || 0,
 
     // RPS mode (overrides VU ramp when set > 0)
-    targetRps: Number(__ENV.TARGET_RPS) || 0,
     preAllocVUs: Number(__ENV.PREALLOCATED_VUS) || 0,
     maxVUs: Number(__ENV.MAX_VUS) || 0,
 
@@ -74,7 +75,14 @@ export const options = {
     noConnectionReuse: false,
     batchPerHost: 6,
     scenarios: {
-        load: CFG.targetRps > 0
+        load: CFG.targetIterations > 0
+            ? {
+                executor: "shared-iterations",
+                vus: CFG.peakVUs,
+                iterations: CFG.targetIterations,
+                maxDuration: "24h", // large cap; test will end as soon as iterations hit 0
+            }
+            : CFG.targetRps > 0
             ? {
                 executor: "constant-arrival-rate",
                 rate: CFG.targetRps,
